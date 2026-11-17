@@ -49,11 +49,13 @@ function shell(title, body, { back, action, sub } = {}) {
     <aside class="side">
       <div class="brand"><img src="/icon.svg" alt=""><div><b>QistBook</b><small>${esc(S.settings.business_name || '')}</small></div></div>
       <a href="#/new" class="newbill">+ New installment bill</a>
+      <form class="slook" onsubmit="event.preventDefault();lookupCode(this.c.value)"><input name="c" placeholder="Customer code…" autocomplete="off"><button>Check</button></form>
       <div class="sgroup">Daily work</div>
       ${side('#/home', '⌂', 'Dashboard')}
       ${side('#/recovery', '◷', 'Recovery / collection')}
       ${side('#/customers', '☺', 'Customers', ['#/customer'])}
       ${side('#/bills', '▤', 'All bills', ['#/bill'])}
+      ${side('#/old', '⟲', 'Add old customers')}
       ${isOwner() ? `<div class="sgroup">Stock</div>
       ${side('#/inventory', '▦', 'Inventory khata', ['#/stock', '#/products'])}
       ${side('#/purchase', '⇩', 'Stock in (purchase)')}
@@ -103,6 +105,7 @@ async function render() {
       case 'more': return renderMore();
       case 'products': case 'inventory': return await renderInventory();
       case 'stock': return await renderStock(id);
+      case 'old': return await renderOld(id);
       case 'purchase': return await renderPurchase();
       case 'suppliers': return await renderSuppliers();
       case 'supplier': return await renderSupplier(id);
@@ -149,6 +152,7 @@ async function renderHome() {
   const yMonth = MONTHS[(+S.settings.yearly_month || 8) - 1];
   const rec = await api('/recovery?mode=overdue');
   shell(S.settings.business_name, `
+    ${lookupBox()}
     <div class="stats">
       <div class="stat hero" onclick="go('#/bills')"><div class="l">Total receivable (market mein baqaya)</div><div class="v money">${rs(d.receivable)}</div><div class="s">${d.active_bills} active bills · ${d.customers} customers</div></div>
       <div class="stat" onclick="go('#/recovery/due')"><div class="l">Due this month</div><div class="v money">${rs(d.due_month)}</div><div class="s">${d.due_month_count} installments</div></div>
@@ -178,6 +182,151 @@ async function loadDemo() {
   try { await api('/demo-data', { method: 'POST' }); toast('Demo data loaded'); render(); } catch (e) { toast(e.message, 1); }
 }
 
+// ---------- customer code lookup ----------
+function lookupBox() {
+  return `<form class="card lookup" onsubmit="event.preventDefault();lookupCode(this.c.value)">
+    <div class="grow"><div class="b" style="margin-bottom:6px">Check customer by code</div>
+    <div class="row"><input name="c" placeholder="Enter code e.g. ${esc(S.settings.code_prefix || 'AQ')}-1001" autocomplete="off" style="text-transform:uppercase"><button class="btn">Check</button></div></div></form>`;
+}
+async function lookupCode(code) {
+  code = String(code || '').trim();
+  if (!code) return toast('Enter a customer code', 1);
+  let d;
+  try { d = await api('/lookup/' + encodeURIComponent(code)); } catch (e) { return toast(e.message, 1); }
+  const c = d.customer;
+  window._look = d;
+  const pct = d.total ? Math.round((d.paid / d.total) * 100) : 0;
+  openSheet(`<div class="row" style="margin-bottom:12px"><div class="av" style="width:48px;height:48px">${initials(c.name)}</div>
+      <div class="grow"><div class="b" style="font-size:18px">${esc(c.name)} <span class="code">${esc(c.code)}</span></div>
+      <div class="mut sm">${esc(c.phone || '')}${c.area ? ' · ' + esc(c.area) : ''}${c.father_name ? ' · ' + esc(c.father_name) : ''}</div></div>
+      <button class="btn sm ghost" onclick="closeSheet()">✕</button></div>
+    ${d.bills.length ? `
+    <div class="g3 lk-big">
+      <div><div class="mut sm">Total</div><b class="money">${rs(d.total)}</b></div>
+      <div><div class="mut sm">Paid</div><b class="money" style="color:var(--g2)">${rs(d.paid)}</b></div>
+      <div><div class="mut sm">Remaining</div><b class="money" style="color:${d.balance > 0 ? 'var(--red)' : 'var(--g)'}">${rs(d.balance)}</b></div>
+    </div>
+    <div class="progress" style="margin:8px 0 4px"><i style="width:${pct}%"></i></div>
+    <div class="row sm" style="margin-bottom:12px"><span class="grow mut">${pct}% paid</span>
+      <b>${d.inst_paid} qist paid · <span style="color:${d.inst_left ? 'var(--red)' : 'var(--g)'}">${d.inst_left} left</span> <span class="mut">(of ${d.inst_total})</span></b></div>
+    ${d.overdue > 0 ? `<div class="card" style="background:var(--redl);border-color:#f0c6c1;padding:10px 12px"><b style="color:var(--red)">Late: ${rs(d.overdue)}</b></div>` : ''}
+    ${d.bills.map((b) => `<div class="card" style="padding:12px">
+      <div class="row"><div class="grow"><b>${b.bill_no}</b> <span class="pill ${b.plan_type === 'yearly' ? 'amb' : 'blue'}">${b.plan_type === 'yearly' ? 'Yearly' : 'Monthly'}</span> ${b.balance <= 0 ? '<span class="pill">Completed</span>' : ''}
+        <div class="sm mut" style="margin-top:2px">${b.package_name ? esc(b.package_name) + ' · ' : ''}${esc(b.items)} · ${fd(b.sale_date)}</div></div></div>
+      <table class="lk-tbl" style="margin-top:8px">
+        <tr><td></td><th class="right">Qist</th><th class="right">Rupees</th></tr>
+        <tr><td>Total (${b.inst_total} × ${rs(b.installment_amt)} + advance ${rs(b.advance)})</td><td class="right">${b.inst_total}</td><td class="right money">${rs(b.total)}</td></tr>
+        <tr><td style="color:var(--g2)">Given / paid</td><td class="right b" style="color:var(--g2)">${b.inst_paid}</td><td class="right money b" style="color:var(--g2)">${rs(b.paid)}</td></tr>
+        <tr><td style="color:var(--red)">Left</td><td class="right b" style="color:var(--red)">${b.inst_left}</td><td class="right money b" style="color:var(--red)">${rs(b.balance)}</td></tr>
+      </table>
+      <div class="sm" style="margin-top:8px">${b.next_due ? `Next qist: <b>${rs(b.next_amt)}</b> on <b>${fd(b.next_due)}</b>` : '<b style="color:var(--g)">All installments paid</b>'}
+        ${b.overdue_count ? ` · <span style="color:var(--red)">${b.overdue_count} late (${rs(b.overdue_amt)})</span>` : ''}
+        ${b.last_payment ? `<div class="mut">Last payment: ${rs(b.last_payment.amount)} on ${fd(b.last_payment.date)}</div>` : ''}</div>
+      <div class="btns" style="margin-top:10px">${b.balance > 0 ? `<button class="btn sm" onclick="collectSheet(${b.id})">Collect qist</button>` : ''}<button class="btn sm ghost" onclick="go('#/bill/${b.id}')">Open bill</button></div>
+    </div>`).join('')}` : '<div class="empty">This customer has no bills yet.</div>'}
+    <div class="btns"><button class="btn ghost grow" onclick="go('#/customer/${c.id}')">Full khata</button>
+      ${c.phone && d.bills.length ? `<a class="btn wa grow" target="_blank" href="${waLink(c.phone, lookupWaText(d))}">Send on WhatsApp</a>` : ''}</div>`);
+}
+function lookupWaText(d) {
+  const c = d.customer;
+  const lines = d.bills.filter((b) => b.balance > 0).map((b) => `${b.bill_no}: ${b.inst_paid} qist paid (Rs ${Math.round(b.paid).toLocaleString('en-PK')}), ${b.inst_left} qist baqi (Rs ${Math.round(b.balance).toLocaleString('en-PK')})${b.next_due ? ', agli qist ' + fd(b.next_due) : ''}`);
+  return `Assalam o Alaikum ${c.name} (Code ${c.code}),\n${lines.join('\n')}\nKul baqaya: Rs ${Math.round(d.balance).toLocaleString('en-PK')}\n— ${S.settings.business_name}`;
+}
+
+// ---------- old / ongoing customers ----------
+const OB = { plan: 'monthly', existing: null };
+async function renderOld(tab) {
+  const pre = new URLSearchParams(location.hash.split('?')[1] || '');
+  shell('Add old customers', `
+    <p class="mut sm" style="margin:0 2px 12px">For customers who bought <b>before</b> you started using the app. Enter their old code, what they bought, their plan and how much they have already paid. This does <b>not</b> change your current stock or today's cash.</p>
+    <div id="oldBody"></div>`, { back: true });
+  OB.plan = 'monthly'; OB.existing = null;
+  let suggested = pre.get('code') || '';
+  if (!suggested) { try { suggested = (await api('/customers/next-code')).code; } catch (e) { /* ignore */ } }
+  const f = (k, l, t = 'text', ph = '', v = '') => `<label class="f"><span>${l}</span><input id="ob_${k}" type="${t}" placeholder="${ph}" value="${esc(v)}"></label>`;
+  $('#oldBody').innerHTML = `<div class="cols wide"><div>
+    <div class="card"><h3>1 · Customer</h3>
+      <div class="codebox"><div class="grow"><div class="mut sm b">Customer code (their old code)</div><input id="ob_code" value="${esc(suggested)}" autocomplete="off"></div>
+      <div class="sm mut" style="max-width:190px">Type the code from your register. If the code already exists, the bill is added to that customer.</div></div>
+      <div id="obExisting"></div>
+      <div id="obNew">
+        <div class="g2">${f('name', 'Full name *')}${f('father_name', 'Father / Husband name')}</div>
+        <div class="g2">${f('phone', 'Mobile (WhatsApp)', 'tel', '03xx-xxxxxxx')}${f('area', 'Area / Mohalla')}</div>
+        <div class="g2">${f('cnic', 'CNIC')}${f('address', 'Address')}</div>
+        <div class="g2">${f('guarantor_name', 'Guarantor (zamin)')}${f('guarantor_phone', 'Guarantor phone', 'tel')}</div>
+      </div>
+    </div>
+    <div class="card"><h3>2 · Goods bought</h3>
+      <label class="f"><span>Goods bought *</span><textarea id="ob_goods" rows="2" placeholder="e.g. Honda CD 70  /  Jahez: fridge, washing machine, bed set"></textarea></label>
+      <div class="g2">${f('old_ref', 'Old bill / register no.', 'text', 'optional')}${f('sale_date', 'Purchase date', 'date')}</div>
+    </div>
+    <div class="card"><h3>3 · Plan and payments so far</h3>
+      <div class="seg" id="obSeg"><button data-p="monthly" class="on">Pays every month</button><button data-p="yearly">Pays once a year (${MONTHS[(+S.settings.yearly_month || 8) - 1]} to ${MONTHS[(+S.settings.yearly_month || 8) - 1]})</button></div>
+      <div class="g2">${f('total', 'Total installment price (Rs) *', 'number')}${f('advance', 'Advance paid (Rs)', 'number', '0')}</div>
+      <div class="g2">${f('installments_count', 'Total installments *', 'number', '12')}${f('paid_count', 'Installments already paid', 'number', '0')}</div>
+      <div class="g2">${f('paid_amount', 'Paid so far, without advance (Rs)', 'number', 'auto')}${f('next_due', 'Next installment due date', 'date')}</div>
+      <div class="mut sm">Leave "Paid so far" empty to calculate it from installments paid. Fill it in only if the customer paid an odd amount.</div>
+    </div>
+  </div><div class="sticky">
+    <div class="card" id="obSum"><div class="mut sm">Fill in the amounts to see the summary.</div></div>
+    <button class="btn full amb" id="obSave" style="padding:14px;font-size:15px">Save old customer</button>
+  </div></div>`;
+  document.querySelectorAll('#obSeg button').forEach((b) => b.onclick = () => { OB.plan = b.dataset.p; document.querySelectorAll('#obSeg button').forEach((x) => x.classList.toggle('on', x === b)); obPreview(); });
+  ['total', 'advance', 'installments_count', 'paid_count', 'paid_amount', 'next_due', 'sale_date'].forEach((k) => $('#ob_' + k).oninput = debounce(obPreview, 300));
+  $('#ob_code').oninput = debounce(obCheckCode, 400);
+  $('#obSave').onclick = obSave;
+  if (pre.get('code')) obCheckCode();
+}
+async function obCheckCode() {
+  const code = $('#ob_code').value.trim();
+  OB.existing = null;
+  if (code) { try { const d = await api('/lookup/' + encodeURIComponent(code)); if (d.customer.code.toUpperCase() === code.toUpperCase()) OB.existing = d; } catch (e) { /* new */ } }
+  $('#obNew').classList.toggle('hidden', !!OB.existing);
+  $('#obExisting').innerHTML = OB.existing ? `<div class="card" style="background:var(--bluel);border-color:#c9daf0;margin:0 0 4px;padding:10px 12px">
+    <b>Existing customer: ${esc(OB.existing.customer.name)}</b> <span class="sm mut">${esc(OB.existing.customer.phone || '')} · ${OB.existing.bills.length} bill(s) · balance ${rs(OB.existing.balance)}</span>
+    <div class="sm">This old bill will be added to this customer.</div></div>` : '';
+}
+function obBody() {
+  const v = (k) => { const el = $('#ob_' + k); return el ? el.value.trim() : ''; };
+  const body = { plan_type: OB.plan };
+  ['code', 'name', 'father_name', 'phone', 'area', 'cnic', 'address', 'guarantor_name', 'guarantor_phone', 'goods', 'old_ref', 'sale_date', 'total', 'advance', 'installments_count', 'paid_count', 'paid_amount', 'next_due'].forEach((k) => body[k] = v(k));
+  if (OB.existing) body.customer_id = OB.existing.customer.id;
+  return body;
+}
+async function obPreview() {
+  const box = $('#obSum'); if (!box) return;
+  const b = obBody();
+  if (!b.total || !b.installments_count) { box.innerHTML = '<div class="mut sm">Fill in the total price and number of installments to see the summary.</div>'; return; }
+  try {
+    const p = await api('/opening/preview', { method: 'POST', body: b });
+    if (!b.next_due && p.next_due) $('#ob_next_due').placeholder = p.next_due;
+    box.innerHTML = `<h3>Summary</h3>
+      <table class="lk-tbl"><tr><td></td><th class="right">Qist</th><th class="right">Rupees</th></tr>
+      <tr><td>Total (${p.installments_count} × ${rs(p.installment_amt)}${p.advance ? ' + advance ' + rs(p.advance) : ''})</td><td class="right">${p.installments_count}</td><td class="right money">${rs(p.total)}</td></tr>
+      <tr><td style="color:var(--g2)">Already paid${p.advance ? ' (incl. advance)' : ''}</td><td class="right b" style="color:var(--g2)">${p.paid_installments}</td><td class="right money b" style="color:var(--g2)">${rs(p.paid_amount + p.advance)}</td></tr>
+      <tr><td style="color:var(--red)">Left</td><td class="right b" style="color:var(--red)">${p.left_installments}</td><td class="right money b" style="color:var(--red)">${rs(p.balance)}</td></tr></table>
+      <div class="sumline" style="background:var(--ambl);border-radius:10px;padding:10px;margin-top:10px"><span><b>${rs(p.installment_amt)}</b> ${p.plan_type === 'yearly' ? 'every year' : 'per month'}</span><span class="sm">${p.next_due ? 'next ' + fd(p.next_due) : 'fully paid'}</span></div>
+      <details style="margin-top:8px"><summary class="sm mut" style="cursor:pointer">View full schedule</summary>
+      <table style="margin-top:6px"><tr><th>#</th><th>Due</th><th class="right">Qist</th><th>Status</th></tr>${p.schedule.map((x) => `<tr><td>${x.seq}</td><td>${fd(x.due_date)}</td><td class="right money">${rs(x.amount)}</td><td><span class="pill ${ST[x.status][1]}">${ST[x.status][0]}</span></td></tr>`).join('')}</table></details>`;
+  } catch (e) { box.innerHTML = `<div class="sm" style="color:var(--red)">${esc(e.message)}</div>`; }
+}
+async function obSave() {
+  try {
+    $('#obSave').disabled = true;
+    const b = obBody();
+    const r = await api('/opening', { method: 'POST', body: b });
+    const phone = OB.existing ? OB.existing.customer.phone : b.phone;
+    const msg = `Assalam o Alaikum ${r.name}, ${S.settings.business_name} mein aap ka Customer Code ${r.code} hai. ${r.paid_installments} qist ada ho chuki hain, ${r.left_installments} qist baqi (Rs ${Math.round(r.balance).toLocaleString('en-PK')}).${r.next_due ? ' Agli qist ' + fd(r.next_due) + ' ko.' : ''} Shukriya.`;
+    openSheet(`<div style="text-align:center;padding:6px 0 4px"><div style="font-size:34px">✓</div><h2 style="margin:4px 0 2px">Old customer saved</h2>
+      <div class="mut">${esc(r.name)} · ${r.bill_no}${r.created ? '' : ' (added to existing customer)'}</div>
+      <div class="bigcode" style="margin-top:12px">${esc(r.code)}</div>
+      <div class="sm" style="margin-top:6px"><b>${r.paid_installments}</b> qist paid · <b style="color:var(--red)">${r.left_installments}</b> left · remaining <b>${rs(r.balance)}</b></div></div>
+      <div class="btns" style="margin-top:16px"><button class="btn amb grow" onclick="closeSheet();renderOld('one')">+ Add another old customer</button>
+      ${phone ? `<a class="btn wa grow" target="_blank" href="${waLink(phone, msg)}">Send on WhatsApp</a>` : ''}
+      <button class="btn ghost grow" onclick="go('#/customer/${r.customer_id}')">Open customer</button></div>`);
+  } catch (e) { toast(e.message, 1); } finally { const b2 = $('#obSave'); if (b2) b2.disabled = false; }
+}
+
 // ---------- recovery ----------
 function recList(rows) {
   if (!rows.length) return `<div class="list"><div class="empty"><div class="i">✓</div>No pending installments here</div></div>`;
@@ -185,7 +334,7 @@ function recList(rows) {
     <div class="item" onclick="go('#/bill/${r.sale_id}')">
       <div class="av">${initials(r.customer_name)}</div>
       <div class="grow">
-        <div class="t">${esc(r.customer_name)} <span class="pill ${r.plan_type === 'yearly' ? 'amb' : 'blue'}">${r.plan_type === 'yearly' ? 'Yearly' : 'Monthly'}</span></div>
+        <div class="t">${r.customer_code ? `<span class="code">${esc(r.customer_code)}</span>` : ''} ${esc(r.customer_name)} <span class="pill ${r.plan_type === 'yearly' ? 'amb' : 'blue'}">${r.plan_type === 'yearly' ? 'Yearly' : 'Monthly'}</span></div>
         <div class="d">${r.bill_no} · ${r.area ? esc(r.area) + ' · ' : ''}due ${fd(r.oldest_due)}${r.count > 1 ? ` · ${r.count} qist pending` : ''}</div>
       </div>
       <div class="right"><div class="b money" style="color:${r.overdue ? 'var(--red)' : 'inherit'}">${rs(r.due_now)}</div><div class="sm mut money">Bal ${rs(r.balance)}</div></div>
@@ -203,7 +352,7 @@ async function renderRecovery(mode) {
   const tabs = [['due', 'This month'], ['overdue', 'Overdue'], ['monthly', 'Monthly plans'], ['yearly', `Yearly (${MONTHS[(+S.settings.yearly_month || 8) - 1]})`], ['all', 'All active']];
   shell('Recovery', `
     <div class="tabs">${tabs.map(([k, l]) => `<button class="${k === mode ? 'on' : ''}" onclick="go('#/recovery/${k}')">${l}</button>`).join('')}</div>
-    <div class="search"><input placeholder="Search name, bill, area…" oninput="filterItems(this.value)"></div>
+    <div class="search"><input placeholder="Search code, name, bill, area…" oninput="filterItems(this.value)"></div>
     <div class="card row"><div class="grow"><div class="mut sm">${rows.length} bills</div><div class="b money" style="font-size:18px">${rs(total)}</div></div>
       <div class="mut sm right">${mode === 'yearly' ? 'Next yearly qist per bill' : mode === 'all' ? 'Next qist per bill' : 'Due up to month end'}</div></div>
     <div id="rlist">${recList(rows)}</div>`, { sub: S.user.name });
@@ -211,7 +360,7 @@ async function renderRecovery(mode) {
 }
 function filterItems(v) {
   v = v.toLowerCase();
-  const rows = (window._rec || []).filter((r) => [r.customer_name, r.bill_no, r.area, r.customer_phone].join(' ').toLowerCase().includes(v));
+  const rows = (window._rec || []).filter((r) => [r.customer_code, r.customer_name, r.bill_no, r.area, r.customer_phone].join(' ').toLowerCase().includes(v));
   $('#rlist').innerHTML = recList(rows);
 }
 
@@ -263,7 +412,7 @@ async function renderNewBill() {
   const cats = [...new Set(products.map((p) => p.category))];
   shell('New Installment Bill', `<div class="cols wide"><div>
     <div class="card"><h3>1 · Customer</h3>
-      <div class="row"><select id="nbCust" class="grow"><option value="">— Select customer —</option>${customers.map((c) => `<option value="${c.id}" ${String(c.id) === NB.customer_id ? 'selected' : ''}>${esc(c.name)}${c.phone ? ' · ' + esc(c.phone) : ''}${c.balance ? ' (bal ' + rs(c.balance) + ')' : ''}</option>`).join('')}</select>
+      <div class="row"><select id="nbCust" class="grow"><option value="">— Select customer —</option>${customers.map((c) => `<option value="${c.id}" data-plan="${c.plan_type || 'monthly'}" ${String(c.id) === NB.customer_id ? 'selected' : ''}>${c.code ? esc(c.code) + ' · ' : ''}${esc(c.name)}${c.phone ? ' · ' + esc(c.phone) : ''}${c.balance ? ' (bal ' + rs(c.balance) + ')' : ''}</option>`).join('')}</select>
       <button class="btn ghost" onclick="customerSheet(null, true)">+ New</button></div>
     </div>
     <div class="card"><h3>2 · Items</h3>
@@ -280,7 +429,7 @@ async function renderNewBill() {
         <label class="f"><span>Discount (Rs)</span><input id="nbDisc" type="number" value="0"></label>
         <label class="f"><span>Advance (Rs)</span><input id="nbAdv" type="number" value="0"></label>
       </div>
-      <div class="seg"><button data-p="monthly" class="on">Every month</button><button data-p="yearly">Once a year (${MONTHS[(+S.settings.yearly_month || 8) - 1]})</button></div>
+      <div class="seg" id="nbSeg"><button data-p="monthly" class="on">Every month</button><button data-p="yearly">Once a year (every ${MONTHS[(+S.settings.yearly_month || 8) - 1]})</button></div>
       <div class="g2">
         <label class="f"><span id="nbCntL">No. of monthly installments</span><input id="nbCnt" type="number" value="12" min="1"></label>
         <label class="f"><span>First installment date</span><input id="nbFirst" type="date"></label>
@@ -294,14 +443,20 @@ async function renderNewBill() {
     </div></div>
   `, { back: true });
   $('#nbAdd').onchange = (e) => { const p = products.find((x) => String(x.id) === e.target.value); if (p) { const ex = NB.items.find((i) => i.product_id === p.id); ex ? ex.qty++ : NB.items.push({ product_id: p.id, name: p.name, qty: 1, price: n(p.cash_price) }); } e.target.value = ''; paintCart(); };
-  document.querySelectorAll('.seg button').forEach((b) => b.onclick = () => {
-    NB.plan = b.dataset.p; document.querySelectorAll('.seg button').forEach((x) => x.classList.toggle('on', x === b));
-    $('#nbCntL').textContent = NB.plan === 'yearly' ? 'No. of yearly installments' : 'No. of monthly installments';
-    $('#nbCnt').value = NB.plan === 'yearly' ? 2 : 12; $('#nbFirst').value = ''; preview();
-  });
+  document.querySelectorAll('#nbSeg button').forEach((b) => b.onclick = () => nbApplyPlan(b.dataset.p));
+  $('#nbCust').onchange = (e) => { const o = e.target.selectedOptions[0]; if (o && o.dataset.plan) nbApplyPlan(o.dataset.plan); };
+  { const o = $('#nbCust').selectedOptions[0]; if (o && o.dataset.plan && o.value) setTimeout(() => nbApplyPlan(o.dataset.plan), 0); }
   ['nbMk', 'nbDisc', 'nbAdv', 'nbCnt', 'nbFirst', 'nbDate'].forEach((id) => $('#' + id).oninput = debounce(preview, 300));
   $('#nbSave').onclick = saveBill;
   paintCart();
+}
+function nbApplyPlan(p) {
+  if (!$('#nbSeg')) return;
+  const changed = NB.plan !== p;
+  NB.plan = p; document.querySelectorAll('#nbSeg button').forEach((x) => x.classList.toggle('on', x.dataset.p === p));
+  $('#nbCntL').textContent = p === 'yearly' ? 'No. of yearly installments' : 'No. of monthly installments';
+  if (changed) { $('#nbCnt').value = p === 'yearly' ? 2 : 12; $('#nbFirst').value = ''; }
+  preview();
 }
 function debounce(f, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => f(...a), ms); }; }
 function pickPackage(id) {
@@ -358,7 +513,8 @@ async function renderCustomers() {
   const cs = await api('/customers');
   window._cs = cs;
   shell('Customers', `
-    <div class="search"><input placeholder="Search name, phone, CNIC, area…" oninput="filterCust(this.value)"></div>
+    <div class="btns" style="margin-bottom:12px"><button class="btn ghost" onclick="go('#/old/one')">⟲ Add old customer</button></div>
+    <div class="search"><input placeholder="Search code, name, phone, CNIC, area…" oninput="filterCust(this.value)"></div>
     <div class="card row sm"><div class="grow"><span class="mut">${cs.length} customers</span></div><div class="right"><span class="mut">Total baqaya</span> <b class="money">${rs(cs.reduce((a, c) => a + c.balance, 0))}</b></div></div>
     <div id="clist">${custList(cs)}</div>`, { action: `<button class="act" onclick="customerSheet()">+ Customer</button>` });
 }
@@ -366,33 +522,65 @@ function custList(cs) {
   if (!cs.length) return `<div class="list"><div class="empty"><div class="i">☺</div>No customers yet</div></div>`;
   return `<div class="list">${cs.map((c) => `<div class="item" onclick="go('#/customer/${c.id}')">
     <div class="av">${initials(c.name)}</div>
-    <div class="grow"><div class="t">${esc(c.name)} ${c.overdue > 0 ? '<span class="pill red">Late</span>' : c.balance <= 0 && c.bills ? '<span class="pill">Clear</span>' : ''}</div>
-    <div class="d">${esc(c.phone || 'No phone')}${c.area ? ' · ' + esc(c.area) : ''} · ${c.bills} bill${c.bills === 1 ? '' : 's'}</div></div>
+    <div class="grow"><div class="t">${c.code ? `<span class="code">${esc(c.code)}</span>` : ''} ${esc(c.name)} ${c.overdue > 0 ? '<span class="pill red">Late</span>' : c.balance <= 0 && c.bills ? '<span class="pill">Clear</span>' : ''}</div>
+    <div class="d">${c.plan_type === 'yearly' ? '<b style="color:#8a5d00">Yearly</b> · ' : ''}${esc(c.phone || 'No phone')}${c.area ? ' · ' + esc(c.area) : ''} · ${c.bills} bill${c.bills === 1 ? '' : 's'}</div></div>
     <div class="right"><div class="b money">${rs(c.balance)}</div>${c.overdue > 0 ? `<div class="sm money" style="color:var(--red)">late ${rs(c.overdue)}</div>` : ''}</div></div>`).join('')}</div>`;
 }
-function filterCust(v) { v = v.toLowerCase(); $('#clist').innerHTML = custList(window._cs.filter((c) => [c.name, c.phone, c.cnic, c.area, c.father_name].join(' ').toLowerCase().includes(v))); }
-function customerSheet(c, fromBill) {
+function filterCust(v) { v = v.toLowerCase(); $('#clist').innerHTML = custList(window._cs.filter((c) => [c.code, c.name, c.phone, c.cnic, c.area, c.father_name].join(' ').toLowerCase().includes(v))); }
+async function customerSheet(c, fromBill) {
   c = c || {};
+  const isNew = !c.id;
+  let suggested = '';
+  if (isNew) { try { suggested = (await api('/customers/next-code')).code; } catch (e) { /* server will assign */ } }
   const f = (k, l, t = 'text', ph = '') => `<label class="f"><span>${l}</span><input id="cf_${k}" type="${t}" value="${esc(c[k] || '')}" placeholder="${ph}"></label>`;
-  openSheet(`<h2>${c.id ? 'Edit' : 'New'} customer</h2>
+  openSheet(`<h2>${isNew ? 'New' : 'Edit'} customer</h2>
+    <div class="codebox"><div class="grow"><div class="mut sm b">Customer code ${isNew ? '(assigned automatically)' : ''}</div>
+      <input id="cf_code" value="${esc(isNew ? suggested : c.code || '')}" autocomplete="off"></div>
+      <div class="sm mut" style="max-width:170px">${isNew ? 'You can keep this code or type the shop’s own code.' : 'Change only if needed.'}</div></div>
     ${f('name', 'Full name *')}
+    <div class="mut sm b" style="margin:2px 0 6px">How will this customer pay installments?</div>
+    <div class="seg" id="cfPlan"><button data-p="monthly" class="${c.plan_type === 'yearly' ? '' : 'on'}">Every month</button><button data-p="yearly" class="${c.plan_type === 'yearly' ? 'on' : ''}">Once a year — every ${MONTHS[(+S.settings.yearly_month || 8) - 1]}</button></div>
+    <div class="sm mut" id="cfPlanNote" style="margin:-4px 0 12px"></div>
     <div class="g2">${f('father_name', 'Father / Husband name')}${f('phone', 'Mobile (WhatsApp)', 'tel', '03xx-xxxxxxx')}</div>
-    <div class="g2">${f('cnic', 'CNIC', 'text', '33100-xxxxxxx-x')}${f('area', 'Area / Mohalla')}</div>
+    <div class="g2">${f('cnic', 'CNIC', 'text', 'xxxxx-xxxxxxx-x')}${f('area', 'Area / Mohalla')}</div>
     ${f('address', 'Full address')}
     <div class="mut sm b" style="margin:6px 0 8px">Guarantor (Zamin)</div>
     <div class="g2">${f('guarantor_name', 'Guarantor name')}${f('guarantor_phone', 'Guarantor phone', 'tel')}</div>
     ${f('guarantor_cnic', 'Guarantor CNIC')}
     ${f('notes', 'Notes (job, reference…)')}
     <button class="btn full" id="cfSave">Save customer</button>`);
+  let plan = c.plan_type === 'yearly' ? 'yearly' : 'monthly';
+  const planNote = () => {
+    const y = new Date().getFullYear(), mi = (+S.settings.yearly_month || 8) - 1, d = +S.settings.yearly_day || 10;
+    const firstY = new Date() < new Date(y, mi, d) ? y : y + 1;
+    $('#cfPlanNote').innerHTML = plan === 'yearly' ? `Pays one big qist every year: ${d} ${MONTHS[mi]} ${firstY}, then ${d} ${MONTHS[mi]} ${firstY + 1}, ${d} ${MONTHS[mi]} ${firstY + 2}…` : 'Pays a qist every month.';
+  };
+  document.querySelectorAll('#cfPlan button').forEach((b) => b.onclick = () => { plan = b.dataset.p; document.querySelectorAll('#cfPlan button').forEach((x) => x.classList.toggle('on', x === b)); planNote(); });
+  planNote();
   $('#cfSave').onclick = async () => {
-    const body = { id: c.id };
-    ['name', 'father_name', 'phone', 'cnic', 'area', 'address', 'guarantor_name', 'guarantor_phone', 'guarantor_cnic', 'notes'].forEach((k) => body[k] = $('#cf_' + k).value.trim());
+    const body = { id: c.id, plan_type: plan };
+    ['name', 'code', 'father_name', 'phone', 'cnic', 'area', 'address', 'guarantor_name', 'guarantor_phone', 'guarantor_cnic', 'notes'].forEach((k) => body[k] = $('#cf_' + k).value.trim());
     try {
+      $('#cfSave').disabled = true;
       const r = await api('/customers', { method: 'POST', body });
-      closeSheet(); toast('Customer saved');
-      if (fromBill) { const sel = $('#nbCust'); sel.insertAdjacentHTML('beforeend', `<option value="${r.id}">${esc(body.name)} · ${esc(body.phone)}</option>`); sel.value = r.id; }
-      else render();
-    } catch (e) { toast(e.message, 1); }
+      if (!isNew) { closeSheet(); toast('Customer saved'); return render(); }
+      if (fromBill) {
+        closeSheet(); toast(`Customer added — code ${r.code}`);
+        const sel = $('#nbCust'); sel.insertAdjacentHTML('beforeend', `<option value="${r.id}" data-plan="${plan}">${esc(r.code)} · ${esc(body.name)}</option>`); sel.value = r.id; nbApplyPlan(plan); return;
+      }
+      const msg = `Assalam o Alaikum ${body.name}, ${S.settings.business_name} mein aap ka Customer Code ${r.code} hai. Qist ki maloomat ke liye yeh code batayein. Shukriya.`;
+      openSheet(`<div style="text-align:center;padding:6px 0 4px">
+        <div style="font-size:34px">✓</div><h2 style="margin:4px 0 2px">Customer added</h2><div class="mut">${esc(body.name)}${body.phone ? ' · ' + esc(body.phone) : ''}</div>
+        <div class="mut sm" style="margin-top:16px">Customer code</div>
+        <div class="bigcode">${esc(r.code)}</div>
+        <div class="mut sm">Write this on the customer’s card / bill book</div>
+        <div style="margin-top:10px"><span class="pill ${plan === 'yearly' ? 'amb' : 'blue'}">${plan === 'yearly' ? 'Pays yearly — every ' + MONTHS[(+S.settings.yearly_month || 8) - 1] : 'Pays monthly'}</span></div></div>
+        <div class="btns" style="margin-top:16px">
+          <button class="btn amb grow" onclick="go('#/new?c=${r.id}')">+ Make bill for this customer</button>
+          ${body.phone ? `<a class="btn wa grow" target="_blank" href="${waLink(body.phone, msg)}">Send code on WhatsApp</a>` : ''}
+          <button class="btn ghost grow" onclick="go('#/customer/${r.id}')">Open customer</button>
+        </div>`);
+    } catch (e) { toast(e.message, 1); const b2 = $('#cfSave'); if (b2) b2.disabled = false; }
   };
 }
 async function renderCustomer(id) {
@@ -404,7 +592,8 @@ async function renderCustomer(id) {
   shell(c.name, `<div class="cols"><div>
     <div class="card">
       <div class="row" style="margin-bottom:10px"><div class="av" style="width:52px;height:52px;font-size:18px">${initials(c.name)}</div>
-      <div class="grow"><div class="b" style="font-size:17px">${esc(c.name)}</div><div class="mut sm">${c.father_name ? 'Father/Husband: ' + esc(c.father_name) : ''}</div></div>
+      <div class="grow"><div class="b" style="font-size:17px">${esc(c.name)} ${c.code ? `<span class="code">${esc(c.code)}</span>` : ''}</div><div class="mut sm">${c.father_name ? 'Father/Husband: ' + esc(c.father_name) : ''}</div>
+      <span class="pill ${c.plan_type === 'yearly' ? 'amb' : 'blue'}" style="margin-top:4px">${c.plan_type === 'yearly' ? 'Pays yearly — every ' + MONTHS[(+S.settings.yearly_month || 8) - 1] : 'Pays monthly'}</span></div>
       <div class="right"><div class="mut sm">Balance</div><div class="b money" style="font-size:19px;color:${d.balance > 0 ? 'var(--red)' : 'var(--g)'}">${rs(d.balance)}</div></div></div>
       <div class="kv">${c.phone ? `<b>Phone</b><span><a href="tel:${esc(c.phone)}">${esc(c.phone)}</a></span>` : ''}${c.cnic ? `<b>CNIC</b><span>${esc(c.cnic)}</span>` : ''}
       ${c.address || c.area ? `<b>Address</b><span>${esc([c.address, c.area].filter(Boolean).join(', '))}</span>` : ''}
@@ -412,6 +601,7 @@ async function renderCustomer(id) {
       ${c.notes ? `<b>Notes</b><span>${esc(c.notes)}</span>` : ''}</div>
       <div class="btns" style="margin-top:12px">
         <button class="btn sm" onclick="go('#/new?c=${c.id}')">+ New bill</button>
+        <button class="btn sm ghost" onclick="go('#/old/one?code=${encodeURIComponent(c.code || '')}')">+ Old bill</button>
         <button class="btn sm ghost" onclick='customerSheet(window._cust.customer)'>Edit</button>
         <button class="btn sm ghost" onclick="printStatement()">Print khata</button>
         ${c.phone ? `<a class="btn sm wa" target="_blank" href="${waLink(c.phone, `Assalam o Alaikum ${c.name}, ${S.settings.business_name} mein aap ka total baqaya Rs ${Math.round(d.balance).toLocaleString('en-PK')} hai. Shukriya.`)}">WhatsApp balance</a>` : ''}
@@ -474,9 +664,9 @@ async function renderBill(id) {
   const overdue = s.schedule.filter((x) => x.due_date < today()).reduce((a, x) => a + x.remaining, 0);
   shell('Bill ' + s.bill_no, `<div class="cols"><div>
     <div class="card">
-      <div class="row"><div class="grow"><a href="#/customer/${s.customer_id}" class="b" style="font-size:17px;text-decoration:none">${esc(s.customer_name)}</a>
+      <div class="row"><div class="grow"><a href="#/customer/${s.customer_id}" class="b" style="font-size:17px;text-decoration:none">${esc(s.customer_name)}</a> ${s.customer_code ? `<span class="code">${esc(s.customer_code)}</span>` : ''}
         <div class="mut sm">${esc(s.customer_phone || '')} · ${fd(s.sale_date)}</div></div>
-        <span class="pill ${s.plan_type === 'yearly' ? 'amb' : 'blue'}">${s.plan_type === 'yearly' ? 'Yearly — every ' + MONTHS[+s.first_due_date.slice(5, 7) - 1] : 'Monthly'}</span></div>
+        ${s.is_opening ? `<span class="pill grey" title="Added from old register">Old record${s.old_ref ? ' · ' + esc(s.old_ref) : ''}</span> ` : ''}<span class="pill ${s.plan_type === 'yearly' ? 'amb' : 'blue'}">${s.plan_type === 'yearly' ? 'Yearly — every ' + MONTHS[+s.first_due_date.slice(5, 7) - 1] : 'Monthly'}</span></div>
       <div class="g3" style="margin-top:12px">
         <div><div class="mut sm">Total</div><div class="b money">${rs(s.total)}</div></div>
         <div><div class="mut sm">Received</div><div class="b money" style="color:var(--g2)">${rs(s.total_paid)}</div></div>
@@ -531,7 +721,7 @@ function doPrint(html) { $('#print').innerHTML = html; setTimeout(() => window.p
 function printBill() {
   const s = window._bill;
   doPrint(`${prHead('Installment Bill ' + s.bill_no)}
-    <table style="margin-bottom:10px"><tr><td><b>Customer:</b> ${esc(s.customer_name)} ${s.father_name ? '(' + esc(s.father_name) + ')' : ''}</td><td><b>Date:</b> ${fd(s.sale_date)}</td></tr>
+    <table style="margin-bottom:10px"><tr><td><b>Customer:</b> ${esc(s.customer_name)} [${esc(s.customer_code || '')}] ${s.father_name ? '(' + esc(s.father_name) + ')' : ''}</td><td><b>Date:</b> ${fd(s.sale_date)}</td></tr>
     <tr><td><b>Phone:</b> ${esc(s.customer_phone || '')} &nbsp; <b>CNIC:</b> ${esc(s.cnic || '')}</td><td><b>Plan:</b> ${s.plan_type === 'yearly' ? 'Yearly' : 'Monthly'} × ${s.installments_count}</td></tr>
     <tr><td colspan="2"><b>Address:</b> ${esc(s.address || '')} &nbsp; <b>Guarantor:</b> ${esc(s.guarantor_name || '')} ${esc(s.guarantor_phone || '')}</td></tr></table>
     <table><tr><th>Item</th><th>Qty</th><th>Price</th><th>Amount</th></tr>${s.items.map((i) => `<tr><td>${esc(i.name)}</td><td>${i.qty}</td><td>${rs(i.price)}</td><td>${rs(i.qty * i.price)}</td></tr>`).join('')}
@@ -554,7 +744,7 @@ function printReceipt(saleId, payId) {
 }
 function printStatement() {
   const d = window._cust; const c = d.customer;
-  doPrint(`${prHead('Customer Khata')}<p><b>${esc(c.name)}</b> ${c.father_name ? '(' + esc(c.father_name) + ')' : ''} · ${esc(c.phone || '')} · ${esc(c.cnic || '')}<br>${esc([c.address, c.area].filter(Boolean).join(', '))}</p>
+  doPrint(`${prHead('Customer Khata')}<p><b>${esc(c.name)}</b> [${esc(c.code || '')}] ${c.father_name ? '(' + esc(c.father_name) + ')' : ''} · ${esc(c.phone || '')} · ${esc(c.cnic || '')}<br>${esc([c.address, c.area].filter(Boolean).join(', '))}</p>
     <table><tr><th>Date</th><th>Detail</th><th>Debit</th><th>Credit</th><th>Balance</th></tr>${d.ledger.map((e) => `<tr><td>${fd(e.date)}</td><td>${esc(e.desc)}</td><td>${e.debit ? rs(e.debit) : ''}</td><td>${e.credit ? rs(e.credit) : ''}</td><td>${rs(e.balance)}</td></tr>`).join('')}
     <tr><td colspan="4" align="right"><b>Balance due</b></td><td><b>${rs(d.balance)}</b></td></tr></table>`);
 }
@@ -565,6 +755,7 @@ function renderMore() {
   shell('More', `
     <div class="list">
       ${it('#/bills', '▤', 'All bills', 'Every installment bill with balance')}
+      ${it('#/old', '⟲', 'Add old customers', 'Customers who bought before the app: old code, goods, qist paid')}
       ${isOwner() ? it('#/inventory', '▦', 'Inventory khata', 'Stock in / out, stock value, every product’s ledger') : ''}
       ${isOwner() ? it('#/purchase', '⇩', 'Stock in (purchase)', 'Record goods bought from a supplier') : ''}
       ${isOwner() ? it('#/suppliers', '⚑', 'Suppliers khata', 'What you owe each dealer / wholesaler') : ''}
@@ -888,7 +1079,7 @@ function staffSheet(u) {
 function renderSettings() {
   const s = S.settings;
   const f = (k, l, t = 'text') => `<label class="f"><span>${l}</span><input id="st_${k}" type="${t}" value="${esc(s[k] || '')}"></label>`;
-  shell('Settings', `<div class="card"><h3>Business</h3>${f('business_name', 'Business name')}${f('business_phone', 'Phone')}${f('business_address', 'Address')}${f('default_markup', 'Default markup %', 'number')}</div>
+  shell('Settings', `<div class="card"><h3>Business</h3>${f('business_name', 'Business name')}${f('business_phone', 'Phone')}${f('business_address', 'Address')}${f('default_markup', 'Default markup %', 'number')}${f('code_prefix', 'Customer code prefix (new customers)')}</div>
     <div class="card"><h3>Yearly installment plan</h3><p class="mut sm" style="margin-top:0">Customers on the yearly plan pay once a year on this date.</p>
     <div class="g2"><label class="f"><span>Month</span><select id="st_yearly_month">${MONTHS.map((mm, i) => `<option value="${i + 1}" ${+s.yearly_month === i + 1 ? 'selected' : ''}>${mm}</option>`).join('')}</select></label>${f('yearly_day', 'Day of month', 'number')}</div></div>
     <div class="card"><h3>WhatsApp messages</h3><p class="mut sm" style="margin-top:0">Use {name} {amount} {bill} {due} {balance} {receipt} {business}</p>
@@ -896,7 +1087,7 @@ function renderSettings() {
     <label class="f"><span>Payment receipt</span><textarea id="st_receipt_template" rows="3">${esc(s.receipt_template)}</textarea></label></div>
     <button class="btn full" id="stSave">Save settings</button>`, { back: true });
   $('#stSave').onclick = async () => {
-    const body = {}; ['business_name', 'business_phone', 'business_address', 'default_markup', 'yearly_month', 'yearly_day', 'wa_template', 'receipt_template'].forEach((k) => body[k] = $('#st_' + k).value);
+    const body = {}; ['business_name', 'business_phone', 'business_address', 'default_markup', 'code_prefix', 'yearly_month', 'yearly_day', 'wa_template', 'receipt_template'].forEach((k) => body[k] = $('#st_' + k).value);
     try { S.settings = await api('/settings', { method: 'PUT', body }); toast('Settings saved'); } catch (e) { toast(e.message, 1); }
   };
 }

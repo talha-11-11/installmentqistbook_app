@@ -86,10 +86,23 @@ async function migrate() {
     kind TEXT NOT NULL, qty INT NOT NULL, unit_cost NUMERIC DEFAULT 0, ref_type TEXT, ref_id INT, ref_no TEXT DEFAULT '',
     note TEXT DEFAULT '', created_by INT REFERENCES users(id), created_at TIMESTAMPTZ DEFAULT now());
   CREATE INDEX IF NOT EXISTS idx_moves_prod ON stock_moves(product_id);
+  ALTER TABLE customers ADD COLUMN IF NOT EXISTS code TEXT;
+  ALTER TABLE customers ADD COLUMN IF NOT EXISTS plan_type TEXT DEFAULT 'monthly';
+  ALTER TABLE sales ADD COLUMN IF NOT EXISTS is_opening BOOLEAN DEFAULT FALSE;
+  ALTER TABLE sales ADD COLUMN IF NOT EXISTS old_ref TEXT DEFAULT '';
   `);
   await q(`INSERT INTO stock_moves(product_id,move_date,kind,qty,unit_cost,note)
     SELECT p.id, CURRENT_DATE, 'opening', p.stock, p.cost_price, 'Opening stock' FROM products p
     WHERE p.stock <> 0 AND NOT EXISTS (SELECT 1 FROM stock_moves m WHERE m.product_id=p.id)`);
+  await q(`UPDATE customers c SET code = 'AQ-' || (1000 + x.rn + COALESCE((SELECT max(substring(code from '\\d+$')::int) - 1000 FROM customers WHERE code ~ '^AQ-\\d+$'), 0))
+    FROM (SELECT id, row_number() OVER (ORDER BY id) rn FROM customers WHERE code IS NULL OR code = '') x WHERE c.id = x.id`);
+  await q('CREATE UNIQUE INDEX IF NOT EXISTS idx_cust_code ON customers (upper(code))');
+  // one-time: customers whose bills are yearly get the yearly plan
+  if (!(await q("SELECT 1 FROM settings WHERE key='plan_backfilled'")).rows.length) {
+    await q(`UPDATE customers c SET plan_type='yearly' WHERE EXISTS (SELECT 1 FROM sales s WHERE s.customer_id=c.id AND s.plan_type='yearly')
+      AND NOT EXISTS (SELECT 1 FROM sales s WHERE s.customer_id=c.id AND s.plan_type='monthly')`);
+    await q("INSERT INTO settings(key,value) VALUES ('plan_backfilled','1')");
+  }
   const u = await q('SELECT count(*)::int c FROM users');
   if (u.rows[0].c === 0) {
     await q("INSERT INTO users(name,pin,role) VALUES ('Owner','1234','owner'),('Recovery Staff','1111','staff')");
@@ -97,7 +110,7 @@ async function migrate() {
   const defaults = {
     business_name: 'Al Qayyum Electronics', business_phone: '0300-0000000',
     business_address: 'Main Bazaar, Loralai', yearly_month: '8', yearly_day: '10',
-    default_markup: '25', currency: 'Rs',
+    default_markup: '25', currency: 'Rs', code_prefix: 'AQ',
     wa_template: 'Assalam o Alaikum {name}, aap ki qist Rs {amount} (Bill {bill}) {due} ko due hai. Baqaya: Rs {balance}. Shukriya — {business}',
     receipt_template: 'Assalam o Alaikum {name}, aap ki qist Rs {amount} wusool ho gayi (Receipt {receipt}, Bill {bill}). Baqaya: Rs {balance}. Shukriya — {business}',
   };
@@ -166,7 +179,7 @@ function allocate(schedule, paidTotal, asOf = today()) {
 }
 async function saleSnapshot(saleId) {
   const s = (await q(`SELECT s.*, c.name customer_name, c.phone customer_phone, c.father_name, c.address, c.cnic,
-      c.guarantor_name, c.guarantor_phone, p.name package_name, u.name created_by_name
+      c.guarantor_name, c.guarantor_phone, c.code customer_code, p.name package_name, u.name created_by_name
       FROM sales s JOIN customers c ON c.id=s.customer_id LEFT JOIN packages p ON p.id=s.package_id
       LEFT JOIN users u ON u.id=s.created_by WHERE s.id=$1`, [saleId])).rows[0];
   if (!s) return null;
@@ -174,7 +187,7 @@ async function saleSnapshot(saleId) {
   const sched = (await q('SELECT * FROM installments WHERE sale_id=$1 ORDER BY seq', [saleId])).rows;
   const pays = (await q(`SELECT p.*, u.name received_by_name FROM payments p LEFT JOIN users u ON u.id=p.received_by
       WHERE sale_id=$1 ORDER BY paid_on, id`, [saleId])).rows;
-  const instPaid = pays.filter((p) => p.kind !== 'advance').reduce((a, p) => a + num(p.amount), 0);
+  const instPaid = pays.filter((p) => p.kind === 'installment' || p.kind === 'old-paid').reduce((a, p) => a + num(p.amount), 0);
   const totalPaid = pays.reduce((a, p) => a + num(p.amount), 0);
   const schedule = allocate(sched, instPaid);
   return { ...s, items, schedule, payments: pays, total_paid: num(totalPaid), balance: num(num(s.total) - totalPaid) };
@@ -182,10 +195,10 @@ async function saleSnapshot(saleId) {
 // All active (balance > 0) sales with allocation — used for dashboard / recovery
 async function allSalesAllocated() {
   const sales = (await q(`SELECT s.id, s.bill_no, s.customer_id, s.total, s.plan_type, s.sale_date, s.installment_amt,
-      c.name customer_name, c.phone customer_phone, c.area, c.address
+      c.name customer_name, c.phone customer_phone, c.area, c.address, c.code customer_code
       FROM sales s JOIN customers c ON c.id=s.customer_id`)).rows;
   const inst = (await q('SELECT * FROM installments ORDER BY sale_id, seq')).rows;
-  const pays = (await q(`SELECT sale_id, sum(amount) total, sum(CASE WHEN kind<>'advance' THEN amount ELSE 0 END) inst
+  const pays = (await q(`SELECT sale_id, sum(amount) total, sum(CASE WHEN kind IN ('installment','old-paid') THEN amount ELSE 0 END) inst
       FROM payments GROUP BY sale_id`)).rows;
   const payMap = Object.fromEntries(pays.map((p) => [p.sale_id, p]));
   const instMap = {};
@@ -319,16 +332,63 @@ app.get('/api/customers', wrap(async (req, res) => {
   }));
 }));
 app.post('/api/customers', wrap(async (req, res) => {
-  const f = ['name', 'father_name', 'phone', 'cnic', 'address', 'area', 'guarantor_name', 'guarantor_phone', 'guarantor_cnic', 'notes'];
+  const f = ['name', 'father_name', 'phone', 'cnic', 'address', 'area', 'guarantor_name', 'guarantor_phone', 'guarantor_cnic', 'notes', 'plan_type'];
+  req.body.plan_type = req.body.plan_type === 'yearly' ? 'yearly' : 'monthly';
   const b = req.body;
   if (!b.name) throw new Error('Customer name required');
   const vals = f.map((k) => b[k] || '');
+  const code = String(b.code || '').trim().toUpperCase();
+  if (code) {
+    const dup = (await q('SELECT id, name FROM customers WHERE upper(code)=$1 AND id<>$2', [code, b.id || 0])).rows[0];
+    if (dup) throw new Error(`Code ${code} is already used by ${dup.name}`);
+  }
   if (b.id) {
     await q(`UPDATE customers SET ${f.map((k, i) => `${k}=$${i + 1}`).join(',')} WHERE id=$${f.length + 1}`, [...vals, b.id]);
+    if (code) await q('UPDATE customers SET code=$1 WHERE id=$2', [code, b.id]);
     return res.json({ ok: true, id: b.id });
   }
   const r = await q(`INSERT INTO customers(${f.join(',')}) VALUES (${f.map((_, i) => `$${i + 1}`).join(',')}) RETURNING id`, vals);
-  res.json({ ok: true, id: r.rows[0].id });
+  const id = r.rows[0].id;
+  const finalCode = code || await nextCode();
+  await q('UPDATE customers SET code=$1 WHERE id=$2', [finalCode, id]);
+  res.json({ ok: true, id, code: finalCode });
+}));
+// next sequential code for a prefix, e.g. AQ-1007
+async function nextCode() {
+  const st = await getSettings();
+  const prefix = (st.code_prefix || 'AQ').toUpperCase().trim();
+  const r = await q(`SELECT COALESCE(max(substring(code from '\\d+$')::int), 1000) m FROM customers WHERE upper(code) LIKE $1 AND code ~ '\\d+$'`, [prefix + '-%']);
+  return `${prefix}-${Math.max(1000, r.rows[0].m) + 1}`;
+}
+app.get('/api/customers/next-code', wrap(async (req, res) => res.json({ code: await nextCode() })));
+
+// quick lookup by customer code — installments paid / left, in count and rupees
+app.get('/api/lookup/:code', wrap(async (req, res) => {
+  const code = String(req.params.code || '').trim().toUpperCase();
+  let c = (await q('SELECT * FROM customers WHERE upper(code)=$1', [code])).rows[0];
+  if (!c && /^\d+$/.test(code)) c = (await q("SELECT * FROM customers WHERE upper(code) LIKE $1 ORDER BY id LIMIT 1", ['%-' + code])).rows[0];
+  if (!c) throw new Error(`No customer with code ${code}`);
+  const ids = (await q('SELECT id FROM sales WHERE customer_id=$1 ORDER BY sale_date, id', [c.id])).rows;
+  const asOf = today();
+  const bills = [];
+  for (const r of ids) {
+    const s = await saleSnapshot(r.id);
+    const paidInst = s.schedule.filter((x) => x.status === 'paid');
+    const left = s.schedule.filter((x) => x.remaining > 0);
+    const next = left[0];
+    bills.push({ id: s.id, bill_no: s.bill_no, sale_date: ymd(s.sale_date), plan_type: s.plan_type, package_name: s.package_name,
+      items: s.items.map((i) => i.name + (i.qty > 1 ? ' ×' + i.qty : '')).join(', '),
+      total: num(s.total), advance: num(s.advance), paid: s.total_paid, balance: s.balance,
+      inst_total: s.schedule.length, inst_paid: paidInst.length, inst_left: left.length,
+      inst_paid_amt: num(s.schedule.reduce((a, x) => a + x.paid, 0)), inst_left_amt: num(left.reduce((a, x) => a + x.remaining, 0)),
+      installment_amt: num(s.installment_amt), next_due: next ? next.due_date : null, next_amt: next ? next.remaining : 0,
+      overdue_amt: num(s.schedule.filter((x) => x.due_date < asOf).reduce((a, x) => a + x.remaining, 0)),
+      overdue_count: s.schedule.filter((x) => x.due_date < asOf && x.remaining > 0).length,
+      last_payment: s.payments.length ? { date: ymd(s.payments[s.payments.length - 1].paid_on), amount: num(s.payments[s.payments.length - 1].amount) } : null });
+  }
+  const sum = (k) => num(bills.reduce((a, b) => a + b[k], 0));
+  res.json({ customer: c, bills, total: sum('total'), paid: sum('paid'), balance: sum('balance'), overdue: sum('overdue_amt'),
+    inst_total: bills.reduce((a, b) => a + b.inst_total, 0), inst_paid: bills.reduce((a, b) => a + b.inst_paid, 0), inst_left: bills.reduce((a, b) => a + b.inst_left, 0) });
 }));
 app.get('/api/customers/:id', wrap(async (req, res) => {
   const c = (await q('SELECT * FROM customers WHERE id=$1', [req.params.id])).rows[0];
@@ -340,7 +400,7 @@ app.get('/api/customers/:id', wrap(async (req, res) => {
   const entries = [];
   for (const s of sales) {
     entries.push({ date: ymd(s.sale_date), type: 'bill', ref: s.bill_no, desc: `Bill — ${s.package_name || s.items[0].name}${s.items.length > 1 ? ` (${s.items.length} items)` : ''}`, debit: num(s.total), credit: 0, sort: 0 });
-    for (const p of s.payments) entries.push({ date: ymd(p.paid_on), type: p.kind, ref: `${s.bill_no} · ${p.receipt_no}`, desc: `${p.kind === 'advance' ? 'Advance' : 'Qist'} (${p.method})${p.note ? ' · ' + p.note : ''}`, debit: 0, credit: num(p.amount), sort: 1, payment_id: p.id });
+    for (const p of s.payments) entries.push({ date: ymd(p.paid_on), type: p.kind, ref: `${s.bill_no} · ${p.receipt_no}`, desc: `${{ advance: 'Advance', installment: 'Qist', 'old-advance': 'Advance (old record)', 'old-paid': 'Paid before app (old record)' }[p.kind] || p.kind}${p.kind.startsWith('old') ? '' : ` (${p.method})`}${p.note ? ' · ' + p.note : ''}`, debit: 0, credit: num(p.amount), sort: 1, payment_id: p.id });
   }
   entries.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.sort - b.sort));
   let bal = 0;
@@ -422,6 +482,85 @@ app.delete('/api/sales/:id', ownerOnly, wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 
+// ---------- old / ongoing customers (opening bills) ----------
+// Records a bill that started before the app: no stock movement, no cash entry today.
+function parseDate(v) {
+  if (!v) return null;
+  if (v instanceof Date) return ymd(v);
+  const t = String(v).trim();
+  let m = t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (m) return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
+  m = t.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})$/); // dd/mm/yyyy (Pakistan format)
+  if (m) { const y = m[3].length === 2 ? '20' + m[3] : m[3]; return `${y}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`; }
+  const d = new Date(t);
+  return isNaN(d) ? null : ymd(d);
+}
+async function computeOpening(b) {
+  const st = await getSettings();
+  const plan_type = /^y|year|aug|sal/i.test(String(b.plan_type || '')) ? 'yearly' : 'monthly';
+  const total = num(b.total), advance = num(b.advance);
+  const count = parseInt(b.installments_count) || 0;
+  if (!(total > 0)) throw new Error('Total installment price is required');
+  if (advance > total) throw new Error('Advance is more than total');
+  if (count < 1) throw new Error('Total number of installments is required');
+  const financed = num(total - advance);
+  const base = Math.round(financed / count);
+  const paidCount = Math.min(count, Math.max(0, parseInt(b.paid_count) || 0));
+  let paidAmt = b.paid_amount === '' || b.paid_amount == null ? null : num(b.paid_amount);
+  if (paidAmt == null) paidAmt = paidCount >= count ? financed : num(base * paidCount);
+  if (paidAmt > financed + 0.01) throw new Error(`Paid so far (Rs ${paidAmt}) is more than the installment amount (Rs ${financed})`);
+  const fullPaid = base > 0 ? Math.min(count, Math.floor((paidAmt + 0.5) / base)) : 0;
+  const step = plan_type === 'monthly' ? 1 : 12;
+  let next = parseDate(b.next_due);
+  if (!next) next = plan_type === 'monthly' ? addMonths(today().slice(0, 8) + '10', 1) : nextYearlyDate(today(), parseInt(st.yearly_month) || 8, parseInt(st.yearly_day) || 10);
+  const first_due_date = addMonths(next, -step * Math.min(fullPaid, count));
+  const sale_date = parseDate(b.sale_date) || addMonths(first_due_date, -step);
+  const schedule = allocate(buildSchedule(financed, count, plan_type, first_due_date), paidAmt);
+  return { plan_type, total, advance, financed, installments_count: count, installment_amt: schedule[0] ? schedule[0].amount : 0,
+    paid_amount: paidAmt, paid_installments: schedule.filter((x) => x.status === 'paid').length, left_installments: schedule.filter((x) => x.remaining > 0).length,
+    balance: num(financed - paidAmt), first_due_date, next_due: (schedule.find((x) => x.remaining > 0) || {}).due_date || null, sale_date, schedule,
+    goods: String(b.goods || '').trim() };
+}
+async function saveOpening(client, b, userId) {
+  const c = await computeOpening(b);
+  if (!c.goods) throw new Error('Goods bought is required');
+  let code = String(b.code || '').trim().toUpperCase();
+  let cust = null;
+  if (b.customer_id) cust = (await client.query('SELECT * FROM customers WHERE id=$1', [b.customer_id])).rows[0];
+  if (!cust && code) cust = (await client.query('SELECT * FROM customers WHERE upper(code)=$1', [code])).rows[0];
+  let created = false;
+  if (!cust) {
+    if (!String(b.name || '').trim()) throw new Error('Customer name is required');
+    if (!code) code = await nextCode();
+    cust = (await client.query(`INSERT INTO customers(name,code,father_name,phone,cnic,area,address,guarantor_name,guarantor_phone,notes,plan_type)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`, [String(b.name).trim(), code, b.father_name || '', String(b.phone || '').trim(), b.cnic || '', b.area || '', b.address || '',
+      b.guarantor_name || '', String(b.guarantor_phone || '').trim(), 'Added as old customer', c.plan_type])).rows[0];
+    created = true;
+  }
+  const s = (await client.query(`INSERT INTO sales(customer_id,sale_date,items_total,markup_pct,markup_amt,discount,total,advance,plan_type,installments_count,
+      installment_amt,first_due_date,notes,created_by,is_opening,old_ref) VALUES ($1,$2,$3,0,0,0,$3,$4,$5,$6,$7,$8,$9,$10,TRUE,$11) RETURNING id`,
+    [cust.id, c.sale_date, c.total, c.advance, c.plan_type, c.installments_count, c.installment_amt, c.first_due_date, b.notes || '', userId, String(b.old_ref || '').trim()])).rows[0];
+  const bill_no = 'B-' + String(s.id).padStart(5, '0');
+  await client.query('UPDATE sales SET bill_no=$1 WHERE id=$2', [bill_no, s.id]);
+  await client.query('INSERT INTO sale_items(sale_id,product_id,name,qty,price) VALUES ($1,NULL,$2,1,$3)', [s.id, c.goods, c.total]);
+  for (const x of c.schedule) await client.query('INSERT INTO installments(sale_id,seq,due_date,amount) VALUES ($1,$2,$3,$4)', [s.id, x.seq, x.due_date, x.amount]);
+  const addPay = async (amt, kind, date, note) => {
+    if (!(amt > 0)) return;
+    const p = (await client.query(`INSERT INTO payments(sale_id,customer_id,amount,kind,paid_on,method,note,received_by) VALUES ($1,$2,$3,$4,$5,'Old record',$6,$7) RETURNING id`,
+      [s.id, cust.id, amt, kind, date, note, userId])).rows[0];
+    await client.query('UPDATE payments SET receipt_no=$1 WHERE id=$2', ['R-' + String(p.id).padStart(5, '0'), p.id]);
+  };
+  await addPay(c.advance, 'old-advance', c.sale_date, '');
+  const lastPaid = c.schedule.filter((x) => x.paid > 0).pop();
+  await addPay(c.paid_amount, 'old-paid', lastPaid ? (lastPaid.due_date < today() ? lastPaid.due_date : today()) : today(), `${c.paid_installments} qist paid before app`);
+  return { sale_id: s.id, bill_no, customer_id: cust.id, code: cust.code, name: cust.name, created, ...c, schedule: undefined };
+}
+app.post('/api/opening/preview', wrap(async (req, res) => res.json(await computeOpening(req.body))));
+app.post('/api/opening', wrap(async (req, res) => {
+  const client = await pool.connect();
+  try { await client.query('BEGIN'); const r = await saveOpening(client, req.body, req.user.id); await client.query('COMMIT'); res.json({ ok: true, ...r }); }
+  catch (e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); }
+}));
 // payments (qist collection)
 app.post('/api/payments', wrap(async (req, res) => {
   const { sale_id, amount, paid_on, method, note } = req.body;
@@ -441,7 +580,7 @@ app.get('/api/payments', wrap(async (req, res) => {
   const from = req.query.from || today(), to = req.query.to || today();
   res.json((await q(`SELECT p.*, c.name customer_name, s.bill_no, u.name received_by_name FROM payments p
     JOIN customers c ON c.id=p.customer_id JOIN sales s ON s.id=p.sale_id LEFT JOIN users u ON u.id=p.received_by
-    WHERE paid_on BETWEEN $1 AND $2 ORDER BY paid_on DESC, p.id DESC`, [from, to])).rows);
+    WHERE paid_on BETWEEN $1 AND $2 AND p.kind IN ('advance','installment') ORDER BY paid_on DESC, p.id DESC`, [from, to])).rows);
 }));
 
 // recovery list
@@ -463,7 +602,7 @@ app.get('/api/recovery', wrap(async (req, res) => {
     else pick = pending.filter((x) => x.due_date <= monthEnd);
     if (!pick.length) continue;
     const dueNow = num(pick.reduce((a, x) => a + x.remaining, 0));
-    rows.push({ sale_id: s.id, bill_no: s.bill_no, customer_id: s.customer_id, customer_name: s.customer_name, customer_phone: s.customer_phone,
+    rows.push({ sale_id: s.id, bill_no: s.bill_no, customer_id: s.customer_id, customer_code: s.customer_code, customer_name: s.customer_name, customer_phone: s.customer_phone,
       area: s.area, plan_type: s.plan_type, oldest_due: pick[0].due_date, count: pick.length, due_now: dueNow, balance: s.balance,
       overdue: pick.some((x) => x.due_date < asOf) });
   }
@@ -596,14 +735,14 @@ app.delete('/api/supplier-payments/:id', ownerOnly, wrap(async (req, res) => { a
 app.get('/api/cashbook', ownerOnly, wrap(async (req, res) => {
   const from = req.query.from || today().slice(0, 8) + '01', to = req.query.to || today();
   const opening = (await q(`SELECT
-      COALESCE((SELECT sum(amount) FROM payments WHERE paid_on < $1),0)
+      COALESCE((SELECT sum(amount) FROM payments WHERE paid_on < $1 AND kind IN ('advance','installment')),0)
     + COALESCE((SELECT sum(amount) FROM expenses WHERE direction='in' AND exp_date < $1),0)
     - COALESCE((SELECT sum(amount) FROM expenses WHERE direction='out' AND exp_date < $1),0)
     - COALESCE((SELECT sum(amount) FROM supplier_payments WHERE paid_on < $1),0) AS bal`, [from])).rows[0].bal;
   const sps = (await q(`SELECT sp.paid_on d, sp.amount, sp.method, sp.note, s.name FROM supplier_payments sp JOIN suppliers s ON s.id=sp.supplier_id
     WHERE paid_on BETWEEN $1 AND $2`, [from, to])).rows;
   const pays = (await q(`SELECT p.paid_on d, p.amount, p.kind, p.receipt_no, p.method, c.name, s.bill_no FROM payments p
-    JOIN customers c ON c.id=p.customer_id JOIN sales s ON s.id=p.sale_id WHERE paid_on BETWEEN $1 AND $2`, [from, to])).rows;
+    JOIN customers c ON c.id=p.customer_id JOIN sales s ON s.id=p.sale_id WHERE paid_on BETWEEN $1 AND $2 AND p.kind IN ('advance','installment')`, [from, to])).rows;
   const exps = (await q('SELECT exp_date d, amount, direction, category, note FROM expenses WHERE exp_date BETWEEN $1 AND $2', [from, to])).rows;
   const entries = [
     ...pays.map((p) => ({ date: ymd(p.d), desc: `${p.kind === 'advance' ? 'Advance' : 'Qist'} — ${p.name} (${p.bill_no}, ${p.receipt_no}, ${p.method})`, in: num(p.amount), out: 0 })),
@@ -640,10 +779,10 @@ app.get('/api/dashboard', wrap(async (req, res) => {
     }
   }
   const r = (await q(`SELECT
-      COALESCE((SELECT sum(amount) FROM payments WHERE paid_on=$1),0) today_in,
-      COALESCE((SELECT sum(amount) FROM payments WHERE to_char(paid_on,'YYYY-MM')=$2),0) month_in,
-      COALESCE((SELECT sum(total) FROM sales WHERE to_char(sale_date,'YYYY-MM')=$2),0) month_sales,
-      COALESCE((SELECT count(*) FROM sales WHERE to_char(sale_date,'YYYY-MM')=$2),0) month_bills,
+      COALESCE((SELECT sum(amount) FROM payments WHERE paid_on=$1 AND kind IN ('advance','installment')),0) today_in,
+      COALESCE((SELECT sum(amount) FROM payments WHERE to_char(paid_on,'YYYY-MM')=$2 AND kind IN ('advance','installment')),0) month_in,
+      COALESCE((SELECT sum(total) FROM sales WHERE to_char(sale_date,'YYYY-MM')=$2 AND NOT is_opening),0) month_sales,
+      COALESCE((SELECT count(*) FROM sales WHERE to_char(sale_date,'YYYY-MM')=$2 AND NOT is_opening),0) month_bills,
       COALESCE((SELECT sum(amount) FROM expenses WHERE direction='out' AND to_char(exp_date,'YYYY-MM')=$2),0) month_exp,
       (SELECT count(*) FROM customers) customers,
       (SELECT count(*) FROM products WHERE active AND stock<=2) low_stock,
@@ -652,7 +791,7 @@ app.get('/api/dashboard', wrap(async (req, res) => {
       COALESCE((SELECT sum(amount) FROM supplier_payments WHERE to_char(paid_on,'YYYY-MM')=$2),0) month_sup_paid`, [asOf, month])).rows[0];
   // last 6 months collections
   const trend = (await q(`SELECT to_char(paid_on,'YYYY-MM') m, sum(amount) amt FROM payments
-    WHERE paid_on >= (date_trunc('month', CURRENT_DATE) - interval '5 months') GROUP BY 1 ORDER BY 1`)).rows;
+    WHERE paid_on >= (date_trunc('month', CURRENT_DATE) - interval '5 months') AND kind IN ('advance','installment') GROUP BY 1 ORDER BY 1`)).rows;
   res.json({ receivable: num(receivable), overdue: num(overdue), overdue_count: overdueCount, due_month: num(dueMonth), due_month_count: dueMonthCount,
     yearly_next: num(yearlyNext), yearly_count: yearlyCount, active_bills: active,
     today_in: num(r.today_in), month_in: num(r.month_in), month_sales: num(r.month_sales), month_bills: +r.month_bills,
@@ -666,10 +805,10 @@ app.get('/api/report', ownerOnly, wrap(async (req, res) => {
   const from = `${month}-01`, to = ymd(new Date(y, m, 0));
   const sales = (await q(`SELECT s.bill_no, s.sale_date, s.total, s.items_total, s.markup_amt, s.advance, s.plan_type, c.name, p.name package_name
     FROM sales s JOIN customers c ON c.id=s.customer_id LEFT JOIN packages p ON p.id=s.package_id
-    WHERE sale_date BETWEEN $1 AND $2 ORDER BY sale_date`, [from, to])).rows;
+    WHERE sale_date BETWEEN $1 AND $2 AND NOT s.is_opening ORDER BY sale_date`, [from, to])).rows;
   const cost = (await q(`SELECT COALESCE(sum(si.qty*pr.cost_price),0) c FROM sale_items si JOIN sales s ON s.id=si.sale_id
-    LEFT JOIN products pr ON pr.id=si.product_id WHERE s.sale_date BETWEEN $1 AND $2`, [from, to])).rows[0].c;
-  const pays = (await q(`SELECT kind, method, sum(amount) amt, count(*) n FROM payments WHERE paid_on BETWEEN $1 AND $2 GROUP BY 1,2`, [from, to])).rows;
+    LEFT JOIN products pr ON pr.id=si.product_id WHERE s.sale_date BETWEEN $1 AND $2 AND NOT s.is_opening`, [from, to])).rows[0].c;
+  const pays = (await q(`SELECT kind, method, sum(amount) amt, count(*) n FROM payments WHERE paid_on BETWEEN $1 AND $2 AND kind IN ('advance','installment') GROUP BY 1,2`, [from, to])).rows;
   const exps = (await q(`SELECT category, direction, sum(amount) amt FROM expenses WHERE exp_date BETWEEN $1 AND $2 GROUP BY 1,2 ORDER BY 3 DESC`, [from, to])).rows;
   const purch = (await q(`SELECT p.purchase_no, p.purchase_date, p.total, s.name FROM purchases p JOIN suppliers s ON s.id=p.supplier_id
     WHERE purchase_date BETWEEN $1 AND $2 ORDER BY purchase_date`, [from, to])).rows;
@@ -724,7 +863,7 @@ app.post('/api/demo-data', ownerOnly, wrap(async (req, res) => {
     ['Rahmatullah', 'Sher Muhammad', '03061234567', '56302-6789012-6', 'Gali 2', 'Sabzi Mandi', 'Abdul Hadi', '03128889999'],
   ];
   const cid = [];
-  for (const c of custs) cid.push((await q(`INSERT INTO customers(name,father_name,phone,cnic,address,area,guarantor_name,guarantor_phone) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`, c)).rows[0].id);
+  for (const c of custs) { const id = (await q(`INSERT INTO customers(name,father_name,phone,cnic,address,area,guarantor_name,guarantor_phone) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`, c)).rows[0].id; await q('UPDATE customers SET code=$1 WHERE id=$2', [await nextCode(), id]); cid.push(id); }
   const base = new Date();
   const ago = (months) => ymd(new Date(base.getFullYear(), base.getMonth() - months, Math.min(base.getDate(), 5)));
   const pk = (await q('SELECT * FROM packages')).rows;
@@ -756,6 +895,7 @@ app.post('/api/demo-data', ownerOnly, wrap(async (req, res) => {
   await makeSale(cid[5], [['Honda CG 125', 1]], { sale_date: ago(1), markup_pct: 20, advance: 60000, plan_type: 'monthly', installments_count: 18, paidCount: 0 });
   for (const [d, cat, amt, dir, note] of [[ago(1), 'Shop Rent', 45000, 'out', ''], [ago(1), 'Staff Salary', 35000, 'out', 'Recovery staff'], [ago(0), 'Electricity Bill', 12000, 'out', ''], [ago(2), 'Owner Investment', 500000, 'in', 'Capital']])
     await q('INSERT INTO expenses(exp_date,category,amount,direction,note,created_by) VALUES ($1,$2,$3,$4,$5,$6)', [d, cat, amt, dir, note, req.user.id]);
+  await q(`UPDATE customers c SET plan_type='yearly' WHERE EXISTS (SELECT 1 FROM sales s WHERE s.customer_id=c.id AND s.plan_type='yearly')`);
   // suppliers + purchases
   const sup1 = (await q(`INSERT INTO suppliers(name,phone,address,opening_balance) VALUES ('Atlas Honda Dealer Quetta','03007001122','Sariab Road, Quetta',0) RETURNING id`)).rows[0].id;
   const sup2 = (await q(`INSERT INTO suppliers(name,phone,address,opening_balance) VALUES ('Quetta Electronics Wholesale','03214445566','Liaquat Bazaar, Quetta',75000) RETURNING id`)).rows[0].id;

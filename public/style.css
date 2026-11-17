@@ -201,3 +201,21 @@ tr:last-child td{border-bottom:0}
   .toast{bottom:28px;left:calc(50% + 124px)}
 }
 @media(min-width:1400px){ .stats{grid-template-columns:repeat(6,1fr)} .stats .stat.hero{grid-column:span 2} }
+
+/* customer code */
+.code{display:inline-block;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11.5px;font-weight:700;background:#17201b;color:#fff;padding:2px 7px;border-radius:6px;letter-spacing:.03em;vertical-align:1px}
+.lookup{background:linear-gradient(135deg,#fff6df,#fff);border-color:#f3dfa6}
+.lookup input{text-transform:uppercase;font-weight:700;letter-spacing:.04em}
+.lk-big b{font-size:17px}
+.lk-tbl td,.lk-tbl th{padding:5px 4px;font-size:13px}
+.slook{display:none}
+@media(min-width:960px){
+  .slook{display:flex;gap:6px;margin:0 4px 6px}
+  .slook input{background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.2);color:#fff;padding:8px 10px;text-transform:uppercase;font-size:13px}
+  .slook input::placeholder{color:rgba(255,255,255,.55);text-transform:none}
+  .slook button{background:#fff;color:var(--g);border:0;border-radius:9px;font-weight:700;padding:0 12px;cursor:pointer}
+  .lookup{max-width:620px}
+}
+.codebox{display:flex;gap:12px;align-items:center;background:var(--ambl);border:1px solid #f3dfa6;border-radius:12px;padding:10px 12px;margin-bottom:12px}
+.codebox input{margin-top:4px;font-family:ui-monospace,Menlo,Consolas,monospace;font-weight:800;font-size:18px;letter-spacing:.05em;text-transform:uppercase;background:#fff}
+.bigcode{display:inline-block;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:34px;font-weight:800;letter-spacing:.06em;background:#17201b;color:#fff;padding:8px 20px;border-radius:12px;margin:6px 0}
