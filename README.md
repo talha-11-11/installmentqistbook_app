@@ -7,7 +7,7 @@ A mobile-first web app for shops that sell electronics, bikes, clothes, furnitur
 - **Two ways to collect:**
   - **Monthly:** a qist every month.
   - **Yearly:** one qist every year on a fixed date (default **10 August**, which you can change in Settings).
-- **Customer code:** every customer gets a code, either automatic (AQ-1001, AQ-1002…) or one you type yourself. Enter a code on the dashboard (or in the sidebar on a laptop) to see total, paid and remaining in rupees, how many qist are paid and how many are left, the next due date and any late amount. From there you can collect, open the bill or send the summary on WhatsApp.
+- **Customer code:** every customer gets a code, either automatic (GM-1001, GM-1002…) or one you type yourself. Enter a code on the dashboard (or in the sidebar on a laptop) to see total, paid and remaining in rupees, how many qist are paid and how many are left, the next due date and any late amount. From there you can collect, open the bill or send the summary on WhatsApp.
 - **Customer plan:** when adding a customer, choose whether they pay **every month** or **once a year, every August** (Aug 2026, Aug 2027, Aug 2028…). Their new bills use that plan automatically, and you can still change it on a bill if needed.
 - **Old customers:** More → *Add old customers* (or **+ Old bill** on a customer's page) records customers who bought before the app. You enter their old code, goods bought, plan, total, advance, installments already paid and the next due date. Old records do not change current stock or today's cash.
 - **Recovery screen:** shows what's due this month, what's overdue, the monthly plans, the yearly (August) plans and every active bill. Each row has buttons to collect, send a WhatsApp reminder or call the customer.

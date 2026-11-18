@@ -94,7 +94,7 @@ async function migrate() {
   await q(`INSERT INTO stock_moves(product_id,move_date,kind,qty,unit_cost,note)
     SELECT p.id, CURRENT_DATE, 'opening', p.stock, p.cost_price, 'Opening stock' FROM products p
     WHERE p.stock <> 0 AND NOT EXISTS (SELECT 1 FROM stock_moves m WHERE m.product_id=p.id)`);
-  await q(`UPDATE customers c SET code = 'AQ-' || (1000 + x.rn + COALESCE((SELECT max(substring(code from '\\d+$')::int) - 1000 FROM customers WHERE code ~ '^AQ-\\d+$'), 0))
+  await q(`UPDATE customers c SET code = 'GM-' || (1000 + x.rn + COALESCE((SELECT max(substring(code from '\\d+$')::int) - 1000 FROM customers WHERE code ~ '^GM-\\d+$'), 0))
     FROM (SELECT id, row_number() OVER (ORDER BY id) rn FROM customers WHERE code IS NULL OR code = '') x WHERE c.id = x.id`);
   await q('CREATE UNIQUE INDEX IF NOT EXISTS idx_cust_code ON customers (upper(code))');
   // one-time: customers whose bills are yearly get the yearly plan
@@ -108,14 +108,20 @@ async function migrate() {
     await q("INSERT INTO users(name,pin,role) VALUES ('Owner','1234','owner'),('Recovery Staff','1111','staff')");
   }
   const defaults = {
-    business_name: 'Al Qayyum Electronics', business_phone: '0300-0000000',
+    business_name: 'Ghulam Mustafa Electronics', business_phone: '0300-0000000',
     business_address: 'Main Bazaar, Loralai', yearly_month: '8', yearly_day: '10',
-    default_markup: '25', currency: 'Rs', code_prefix: 'AQ',
+    default_markup: '25', currency: 'Rs', code_prefix: 'GM',
     wa_template: 'Assalam o Alaikum {name}, aap ki qist Rs {amount} (Bill {bill}) {due} ko due hai. Baqaya: Rs {balance}. Shukriya — {business}',
     receipt_template: 'Assalam o Alaikum {name}, aap ki qist Rs {amount} wusool ho gayi (Receipt {receipt}, Bill {bill}). Baqaya: Rs {balance}. Shukriya — {business}',
   };
   // rename old default name if it was never changed
-  await q("UPDATE settings SET value='Al Qayyum Electronics' WHERE key='business_name' AND value='Al-Madina Installments'");
+  await q("UPDATE settings SET value='Ghulam Mustafa Electronics' WHERE key='business_name' AND value IN ('Al-Madina Installments','Al Qayyum Electronics')");
+  // one-time: switch the old AQ code prefix (from the earlier name) to GM
+  if (!(await q("SELECT 1 FROM settings WHERE key='gm_codes_done'")).rows.length) {
+    await q("UPDATE settings SET value='GM' WHERE key='code_prefix' AND value='AQ'");
+    await q("UPDATE customers SET code = 'GM-' || substring(code from 4) WHERE code ~ '^AQ-\\d+$' AND NOT EXISTS (SELECT 1 FROM customers c2 WHERE upper(c2.code) = 'GM-' || substring(customers.code from 4))");
+    await q("INSERT INTO settings(key,value) VALUES ('gm_codes_done','1')");
+  }
   await q("UPDATE settings SET value='Main Bazaar, Loralai' WHERE key='business_address' AND value='Main Bazaar, Faisalabad'");
   for (const [k, v] of Object.entries(defaults)) {
     await q('INSERT INTO settings(key,value) VALUES ($1,$2) ON CONFLICT (key) DO NOTHING', [k, v]);
@@ -353,10 +359,10 @@ app.post('/api/customers', wrap(async (req, res) => {
   await q('UPDATE customers SET code=$1 WHERE id=$2', [finalCode, id]);
   res.json({ ok: true, id, code: finalCode });
 }));
-// next sequential code for a prefix, e.g. AQ-1007
+// next sequential code for a prefix, e.g. GM-1007
 async function nextCode() {
   const st = await getSettings();
-  const prefix = (st.code_prefix || 'AQ').toUpperCase().trim();
+  const prefix = (st.code_prefix || 'GM').toUpperCase().trim();
   const r = await q(`SELECT COALESCE(max(substring(code from '\\d+$')::int), 1000) m FROM customers WHERE upper(code) LIKE $1 AND code ~ '\\d+$'`, [prefix + '-%']);
   return `${prefix}-${Math.max(1000, r.rows[0].m) + 1}`;
 }

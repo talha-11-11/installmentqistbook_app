@@ -186,7 +186,7 @@ async function loadDemo() {
 function lookupBox() {
   return `<form class="card lookup" onsubmit="event.preventDefault();lookupCode(this.c.value)">
     <div class="grow"><div class="b" style="margin-bottom:6px">Check customer by code</div>
-    <div class="row"><input name="c" placeholder="Enter code e.g. ${esc(S.settings.code_prefix || 'AQ')}-1001" autocomplete="off" style="text-transform:uppercase"><button class="btn">Check</button></div></div></form>`;
+    <div class="row"><input name="c" placeholder="Enter code e.g. ${esc(S.settings.code_prefix || 'GM')}-1001" autocomplete="off" style="text-transform:uppercase"><button class="btn">Check</button></div></div></form>`;
 }
 async function lookupCode(code) {
   code = String(code || '').trim();
